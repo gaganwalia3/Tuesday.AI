@@ -61,6 +61,7 @@ textarea:focus-visible {
 }
 
 .app-shell {
+  position: relative;
   width: 100%;
   height: 100vh;
   height: 100dvh;
@@ -81,7 +82,7 @@ textarea:focus-visible {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 26px 16px 17px;
+  padding: 20px 16px 17px;
   background: #101012;
   border-right: 1px solid var(--line);
   overflow: hidden;
@@ -97,7 +98,8 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 1px 4px 35px;
+  margin: 0 4px 42px;
+  padding-left: 40px; /* room for the sidebar toggle */
   color: var(--text);
   text-decoration: none;
   font: 700 20px/1 'Manrope', sans-serif;
@@ -198,7 +200,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 30px 8px 10px;
+  padding: 24px 6px 10px 8px;
   color: #858389;
   font-size: 11px;
   font-weight: 700;
@@ -206,34 +208,65 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
+.history-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .history-count {
-  color: #626167;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #9b98a0;
   font-size: 10px;
+  font-weight: 600;
   letter-spacing: 0;
+  text-align: center;
+}
+
+.view-all {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 152, 73, 0.2);
+  border-radius: 99px;
+  background: rgba(255, 152, 73, 0.07);
+  color: #e6c3a8;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.view-all:hover {
+  border-color: rgba(255, 152, 73, 0.45);
+  background: rgba(255, 152, 73, 0.14);
 }
 
 .conversation-list {
   flex: 1;
   min-height: 100px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 2px 0;
+  overflow-y: auto;
 }
 
+/* One row per chat: [dot / delete] [title] [View] */
 .conversation-item {
-  width: 100%;
-  min-height: 39px;
+  position: relative;
+  min-height: 40px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 2px 0;
-  padding: 0 10px;
+  gap: 4px;
+  padding: 0 6px 0 4px;
   border: 1px solid transparent;
-  border-radius: 9px;
-  background: transparent;
+  border-radius: 10px;
   color: #a8a6ac;
-  text-align: left;
-  cursor: pointer;
-  transition: 0.18s ease;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
 
 .conversation-item:hover {
@@ -242,18 +275,95 @@ textarea:focus-visible {
 }
 
 .conversation-item.active {
-  border-color: rgba(255, 152, 73, 0.11);
-  background: rgba(255, 152, 73, 0.105);
+  border-color: rgba(255, 152, 73, 0.14);
+  background: linear-gradient(100deg, rgba(255, 152, 73, 0.16), rgba(255, 152, 73, 0.06));
   color: #fff0e4;
 }
 
-.conversation-icon {
-  color: #85838a;
-  font-size: 16px;
+/* Accent bar on the active chat */
+.conversation-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--orange);
 }
 
-.conversation-item.active .conversation-icon {
-  color: var(--orange);
+.conversation-open {
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Leading slot: a small dot that turns into the delete button on hover */
+.conversation-icon {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.conversation-icon::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5f5d64;
+  transition: opacity 0.15s ease, background 0.18s ease;
+}
+
+.conversation-item.active .conversation-icon::before {
+  background: var(--orange);
+  box-shadow: 0 0 8px rgba(255, 152, 73, 0.6);
+}
+
+.conversation-delete {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #96939a;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) scale(0.9);
+  transition: opacity 0.15s ease, transform 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.conversation-item:hover .conversation-delete,
+.conversation-delete:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) scale(1);
+}
+
+.conversation-item:hover .conversation-icon::before,
+.conversation-item:has(.conversation-delete:focus-visible) .conversation-icon::before {
+  opacity: 0;
+}
+
+.conversation-delete:hover {
+  background: rgba(255, 111, 100, 0.15);
+  color: #ff8f86;
 }
 
 .conversation-title {
@@ -261,7 +371,37 @@ textarea:focus-visible {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 12px;
+  font-size: 12.5px;
+  transition: filter 0.2s ease;
+}
+
+.conversation-title.is-blurred {
+  filter: blur(5px);
+  user-select: none;
+}
+
+.conversation-view {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #8f8c93;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.conversation-item:hover .conversation-view,
+.conversation-item.active .conversation-view {
+  color: #c9c5ca;
+}
+
+.conversation-view:hover {
+  border-color: rgba(255, 152, 73, 0.4);
+  background: rgba(255, 152, 73, 0.12);
+  color: #ffd2a8;
 }
 
 .empty-sidebar {
@@ -2068,85 +2208,151 @@ button.tool-row:hover .tool-arrow {
 }
 
 /* ==========================================================================
-   Sidebar: blurred chat names + View buttons
+   Working indicator (spinning sun + timer + current activity)
    ========================================================================== */
 
-.history-label {
-  display: flex;
+.thinking-row {
   align-items: center;
-  gap: 7px;
+  gap: 12px;
 }
 
-.view-all {
-  padding: 3px 9px;
-  border: 1px solid rgba(255, 152, 73, 0.2);
-  border-radius: 99px;
-  background: rgba(255, 152, 73, 0.07);
-  color: #e6c3a8;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0;
-  text-transform: none;
-  cursor: pointer;
-  transition: 0.18s ease;
-}
-
-.view-all:hover {
-  border-color: rgba(255, 152, 73, 0.45);
-  background: rgba(255, 152, 73, 0.14);
-}
-
-/* Each chat is now a row with two buttons: open + view */
-.conversation-item {
-  padding: 0 6px 0 10px;
-}
-
-.conversation-open {
-  flex: 1;
-  min-width: 0;
-  min-height: 37px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.conversation-title {
-  transition: filter 0.2s ease;
-}
-
-.conversation-title.is-blurred {
-  filter: blur(5px);
-  user-select: none;
-}
-
-.conversation-view {
+.thinking-sun {
+  position: relative;
+  width: 38px;
+  height: 38px;
   flex: 0 0 auto;
-  padding: 3px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 99px;
-  background: rgba(255, 255, 255, 0.04);
-  color: #a8a6ac;
-  font-size: 10px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: 0.18s ease;
 }
 
-.conversation-view:hover {
-  border-color: rgba(255, 152, 73, 0.4);
+.thinking-sun img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 50%;
+  user-select: none;
+  pointer-events: none;
+}
+
+.thinking-sun .sun-rays {
+  filter: drop-shadow(0 0 5px rgba(255, 135, 65, 0.4));
+  animation: sun-spin 7s linear infinite;
+}
+
+.thinking-sun .sun-core {
+  filter: drop-shadow(0 0 6px rgba(255, 152, 73, 0.5));
+  animation: sun-pulse-small 1.6s ease-in-out infinite;
+}
+
+@keyframes sun-pulse-small {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 4px rgba(255, 152, 73, 0.35));
+  }
+  50% {
+    transform: scale(1.08);
+    filter: drop-shadow(0 0 9px rgba(255, 152, 73, 0.8));
+  }
+}
+
+.thinking-row > .working-copy {
+  gap: 4px;
+  padding-top: 0;
+}
+
+.thinking-label {
+  color: #cfcbcf;
+  font-size: 12px;
+}
+
+.thinking-label b {
+  color: var(--orange-bright);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.working-activity {
+  color: #8d8a91;
+  font-size: 11px;
+  animation: activity-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes activity-glow {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ==========================================================================
+   Sidebar toggle (open / close the whole left panel)
+   ========================================================================== */
+
+.sidebar-toggle {
+  position: absolute;
+  top: 13px;
+  left: 16px;
+  z-index: 30;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #b9b5ba;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s, color 0.18s;
+}
+
+.sidebar-toggle:hover {
+  border-color: rgba(255, 152, 73, 0.35);
   background: rgba(255, 152, 73, 0.1);
   color: #ffd2a8;
 }
 
-/* Collapsed (mobile) sidebar: no room for the view buttons */
+.sidebar {
+  transition: width 0.25s ease, min-width 0.25s ease, padding 0.25s ease,
+    border-width 0.25s ease, opacity 0.2s ease, visibility 0s linear 0s;
+}
+
+.topbar {
+  transition: padding-left 0.25s ease;
+}
+
+.app-shell.sidebar-closed .sidebar {
+  width: 0;
+  min-width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-right-width: 0;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: width 0.25s ease, min-width 0.25s ease, padding 0.25s ease,
+    border-width 0.25s ease, opacity 0.2s ease, visibility 0s linear 0.25s;
+}
+
+/* Leave room for the toggle, which now sits over the top bar */
+.app-shell.sidebar-closed .topbar {
+  padding-left: 64px;
+}
+
 @media (max-width: 560px) {
-  .conversation-view {
+  /* The sidebar is already a slim icon rail here */
+  .sidebar-toggle {
+    display: none;
+  }
+
+  .brand {
+    padding-left: 0;
+  }
+
+  .conversation-view,
+  .conversation-delete {
     display: none;
   }
 
@@ -2156,5 +2362,10 @@ button.tool-row:hover .tool-arrow {
 
   .conversation-open {
     justify-content: center;
+    padding: 0;
+  }
+
+  .app-shell.sidebar-closed .topbar {
+    padding-left: 13px;
   }
 }

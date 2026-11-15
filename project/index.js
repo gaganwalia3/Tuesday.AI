@@ -1,5 +1,7 @@
-const { GoogleGenAI } = require("@google/genai");
+
 require("dotenv").config();
+
+const OpenAI = require("openai");
 
 const toolRegistry = require("./tools");
 
@@ -17,38 +19,75 @@ const {
 
 
 // ==========================================
-// GEMINI
+// GROQ CONFIGURATION
 // ==========================================
 
-const ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY
+if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY is missing from your .env file.");
+}
+
+const ai = new OpenAI({
+    apiKey: process.env.GROQ_API_KEY,
+    baseURL: "https://api.groq.com/openai/v1"
 });
+
+const MODEL =
+    process.env.GROQ_MODEL || "openai/gpt-oss-20b";
+
+
+// ==========================================
+// JSON SCHEMA NORMALIZER
+// Gemini schemas may use uppercase types.
+// OpenAI-compatible APIs expect lowercase types.
+// ==========================================
+
+function normalizeJsonSchema(schema) {
+    if (!schema || typeof schema !== "object") {
+        return schema;
+    }
+
+    if (Array.isArray(schema)) {
+        return schema.map(normalizeJsonSchema);
+    }
+
+    const normalized = {};
+
+    for (const [key, value] of Object.entries(schema)) {
+        if (key === "type" && typeof value === "string") {
+            normalized[key] = value.toLowerCase();
+        } else if (
+            value &&
+            typeof value === "object"
+        ) {
+            normalized[key] = normalizeJsonSchema(value);
+        } else {
+            normalized[key] = value;
+        }
+    }
+
+    return normalized;
+}
 
 
 // ==========================================
 // TOOL DEFINITIONS
 // ==========================================
 
-const functionDeclarations = Object.entries(
-    toolRegistry
-).map(([name, tool]) => ({
-
-    name,
-
-    description:
-        tool.description,
-
-    parameters:
-        tool.parameters
-
-}));
-
-
-const tools = [
-    {
-        functionDeclarations
-    }
-];
+const tools = Object.entries(toolRegistry).map(
+    ([name, tool]) => ({
+        type: "function",
+        function: {
+            name,
+            description: tool.description || "",
+            parameters: normalizeJsonSchema(
+                tool.parameters || {
+                    type: "object",
+                    properties: {}
+                }
+            )
+        }
+    })
+);
 
 
 // ==========================================
@@ -215,7 +254,7 @@ If a tool fails:
 - use another tool if appropriate
 - otherwise explain the limitation
 
-Do not repeatedly retry the same failed operation
+Do not repeatedly retry the same failed tool
 without a meaningful reason.
 
 ==========================================
@@ -262,30 +301,16 @@ When the user's goal has been sufficiently satisfied:
 // ==========================================
 
 function convertMessages(messages) {
-
     return messages
-
-        .filter(
-            message =>
-                message &&
-                message.content &&
-                typeof message.content === "string" &&
-                message.content.trim()
+        .filter(message =>
+            message &&
+            ["user", "assistant"].includes(message.role) &&
+            typeof message.content === "string" &&
+            message.content.trim()
         )
-
         .map(message => ({
-
-            role:
-                message.role === "assistant"
-                    ? "model"
-                    : "user",
-
-            parts: [
-                {
-                    text: message.content
-                }
-            ]
-
+            role: message.role,
+            content: message.content
         }));
 }
 
@@ -295,14 +320,12 @@ function convertMessages(messages) {
 // ==========================================
 
 function getUserGoal(messages) {
-
-    const userMessages =
-        messages.filter(
-            message =>
-                message &&
-                message.role === "user" &&
-                message.content
-        );
+    const userMessages = messages.filter(
+        message =>
+            message &&
+            message.role === "user" &&
+            message.content
+    );
 
     if (userMessages.length === 0) {
         return null;
@@ -316,56 +339,85 @@ function getUserGoal(messages) {
 // DUPLICATE TOOL CHECK
 // ==========================================
 
-function isDuplicateToolCall(
-    state,
-    toolName,
-    args
-) {
-
-    return state.toolHistory.some(
-        previous =>
-
-            previous.tool === toolName &&
-
-            JSON.stringify(
-                previous.arguments
-            ) ===
-            JSON.stringify(args)
+function isDuplicateToolCall(state, toolName, args) {
+    return state.toolHistory.some(previous =>
+        previous.tool === toolName &&
+        JSON.stringify(previous.arguments) ===
+        JSON.stringify(args)
     );
 }
 
 
 // ==========================================
-// SEND TOOL RESULT TO GEMINI
+// ADD TOOL RESULT TO GROQ CONTEXT
 // ==========================================
 
-function addToolResult(
-    contents,
-    toolName,
-    result
-) {
-
+function addToolResult(contents, toolCallId, result) {
     contents.push({
-
-        role: "user",
-
-        parts: [
-
-            {
-                functionResponse: {
-
-                    name: toolName,
-
-                    response: {
-                        result
-                    }
-
-                }
-            }
-
-        ]
-
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: JSON.stringify(result)
     });
+}
+
+
+// ==========================================
+// REQUEST GROQ MODEL
+// ==========================================
+
+async function requestModel(contents) {
+    const response = await ai.chat.completions.create({
+        model: MODEL,
+
+        messages: [
+            {
+                role: "system",
+                content: systemInstruction
+            },
+            ...contents
+        ],
+
+        tools,
+
+        tool_choice: "auto",
+
+        // Important: confirmation handling is sequential.
+        parallel_tool_calls: false,
+
+        temperature: 0.2,
+
+        reasoning_effort: "low",
+
+        max_completion_tokens: 2048
+    });
+
+    const assistantMessage =
+        response.choices?.[0]?.message;
+
+    if (!assistantMessage) {
+        throw new Error("Groq returned an invalid response.");
+    }
+
+    return assistantMessage;
+}
+
+
+// ==========================================
+// PARSE TOOL CALL ARGUMENTS
+// ==========================================
+
+function parseToolArguments(functionCall) {
+    const toolName = functionCall.function?.name;
+
+    try {
+        return JSON.parse(
+            functionCall.function?.arguments || "{}"
+        );
+    } catch {
+        throw new Error(
+            `Invalid arguments returned for tool: ${toolName}`
+        );
+    }
 }
 
 
@@ -376,36 +428,28 @@ function addToolResult(
 async function runAgent(messages) {
 
     // ------------------------------------------
-    // Convert conversation
+    // CONVERT CONVERSATION
     // ------------------------------------------
 
-    let contents =
-        convertMessages(messages);
-
-
-    // ------------------------------------------
-    // Create state
-    // ------------------------------------------
-
-    const state =
-        createAgentState(messages);
-
-
-    state.userGoal =
-        getUserGoal(messages);
+    let contents = convertMessages(messages);
 
 
     // ------------------------------------------
-    // Agent loop
+    // CREATE AGENT STATE
     // ------------------------------------------
 
-    while (
-        state.iteration <
-        state.maxIterations
-    ) {
+    const state = createAgentState(messages);
+
+    state.userGoal = getUserGoal(messages);
+
+
+    // ------------------------------------------
+    // AGENT LOOP
+    // ------------------------------------------
+
+    while (state.iteration < state.maxIterations) {
 
         state.iteration++;
-
 
         console.log(
             `\n🤖 Nexus thinking... ` +
@@ -414,25 +458,11 @@ async function runAgent(messages) {
 
 
         // ======================================
-        // ASK GEMINI
+        // ASK GROQ
         // ======================================
 
-        const response =
-            await ai.models.generateContent({
-
-                model: "gemini-3.6-flash",
-
-                contents,
-
-                config: {
-
-                    tools,
-
-                    systemInstruction
-
-                }
-
-            });
+        const assistantMessage =
+            await requestModel(contents);
 
 
         // ======================================
@@ -440,180 +470,121 @@ async function runAgent(messages) {
         // ======================================
 
         const functionCalls =
-            response.functionCalls;
+            assistantMessage.tool_calls || [];
 
 
         // ======================================
         // FINAL RESPONSE
         // ======================================
 
-        if (
-            !functionCalls ||
-            functionCalls.length === 0
-        ) {
+        if (functionCalls.length === 0) {
 
-            state.status =
-                "completed";
-
+            state.status = "completed";
 
             console.log(
                 `✅ Nexus finished after ` +
                 `${state.iteration} iteration(s).`
             );
 
-
             return {
-
                 status: "completed",
-
-                text:
-                    response.text,
-
+                text: assistantMessage.content || "",
                 state
-
             };
         }
 
 
         // ======================================
-        // VALIDATE RESPONSE
+        // STORE ASSISTANT TOOL CALL MESSAGE
         // ======================================
 
-        if (
-            !response.candidates ||
-            !response.candidates[0] ||
-            !response.candidates[0].content
-        ) {
-
-            throw new Error(
-                "Gemini returned an invalid response."
-            );
-        }
+        contents.push(assistantMessage);
 
 
         // ======================================
-        // STORE MODEL TOOL CALL
+        // EXECUTE TOOL CALLS
         // ======================================
 
-        contents.push(
-            response.candidates[0].content
-        );
-
-
-        // ======================================
-        // EXECUTE TOOLS
-        // ======================================
-
-        for (
-            const functionCall
-            of functionCalls
-        ) {
+        for (const functionCall of functionCalls) {
 
             const toolName =
-                functionCall.name;
+                functionCall.function?.name;
 
             const args =
-                functionCall.args || {};
+                parseToolArguments(functionCall);
+
+            const toolCallId =
+                functionCall.id;
 
 
             console.log(
                 `\n🔧 Tool requested: ${toolName}`
             );
 
-            console.log(
-                "📥 Arguments:",
-                args
-            );
+            console.log("📥 Arguments:", args);
 
 
             // ==================================
             // FIND TOOL
             // ==================================
 
-            const tool =
-                toolRegistry[toolName];
+            const tool = toolRegistry[toolName];
 
 
             if (!tool) {
 
                 const result = {
-
                     success: false,
-
-                    error:
-                        `Unknown tool requested: ${toolName}`
-
+                    error: `Unknown tool requested: ${toolName}`
                 };
 
-
-                recordToolExecution(
-                    state,
-                    {
-                        tool: toolName,
-                        arguments: args,
-                        result,
-                        success: false
-                    }
-                );
-
+                recordToolExecution(state, {
+                    tool: toolName,
+                    arguments: args,
+                    result,
+                    success: false
+                });
 
                 addToolResult(
                     contents,
-                    toolName,
+                    toolCallId,
                     result
                 );
-
 
                 continue;
             }
 
 
             // ==================================
-            // DUPLICATE CALL
+            // DUPLICATE CALL CHECK
             // ==================================
 
-            if (
-                isDuplicateToolCall(
-                    state,
-                    toolName,
-                    args
-                )
-            ) {
+            if (isDuplicateToolCall(state, toolName, args)) {
 
                 console.log(
                     `⚠️ Duplicate tool call detected: ${toolName}`
                 );
 
-
                 const result = {
-
                     success: false,
-
                     error:
                         "This exact tool call has already " +
                         "been executed. Use the previous " +
                         "result or choose another action."
-
                 };
 
-
-                recordToolExecution(
-                    state,
-                    {
-                        tool: toolName,
-                        arguments: args,
-                        result,
-                        success: false
-                    }
-                );
-
+                recordToolExecution(state, {
+                    tool: toolName,
+                    arguments: args,
+                    result,
+                    success: false
+                });
 
                 addToolResult(
                     contents,
-                    toolName,
+                    toolCallId,
                     result
                 );
-
 
                 continue;
             }
@@ -625,30 +596,22 @@ async function runAgent(messages) {
 
             if (tool.requiresConfirmation) {
 
-                requestConfirmation(
-                    state,
-                    {
-                        tool: toolName,
-                        arguments: args
-                    }
-                );
+                requestConfirmation(state, {
+                    tool: toolName,
+                    arguments: args
+                });
 
 
                 const confirmationId =
                     createPendingAction({
-
                         messages,
-
                         contents,
-
                         state,
+                        tool: toolName,
+                        arguments: args,
 
-                        tool:
-                            toolName,
-
-                        arguments:
-                            args
-
+                        // Preserve the original Groq tool-call ID.
+                        toolCallId
                     });
 
 
@@ -658,26 +621,14 @@ async function runAgent(messages) {
 
 
                 return {
-
-                    status:
-                        "confirmation_required",
+                    status: "confirmation_required",
 
                     confirmation: {
-
-                        id:
-                            confirmationId,
-
-                        tool:
-                            toolName,
-
-                        arguments:
-                            args,
-
-                        category:
-                            tool.category
-
+                        id: confirmationId,
+                        tool: toolName,
+                        arguments: args,
+                        category: tool.category
                     }
-
                 };
             }
 
@@ -687,19 +638,13 @@ async function runAgent(messages) {
             // ==================================
 
             let result;
-
             let success = true;
-
 
             try {
 
-                state.currentTool =
-                    toolName;
+                state.currentTool = toolName;
 
-
-                result =
-                    await tool.execute(args);
-
+                result = await tool.execute(args);
 
                 console.log(
                     `📦 ${toolName} executed successfully.`
@@ -709,20 +654,14 @@ async function runAgent(messages) {
 
                 success = false;
 
-
                 console.error(
                     `❌ ${toolName} failed:`,
                     error.message
                 );
 
-
                 result = {
-
                     success: false,
-
-                    error:
-                        error.message
-
+                    error: error.message
                 };
             }
 
@@ -731,29 +670,25 @@ async function runAgent(messages) {
             // RECORD RESULT
             // ==================================
 
-            recordToolExecution(
-                state,
-                {
-                    tool: toolName,
-                    arguments: args,
-                    result,
-                    success
-                }
-            );
+            recordToolExecution(state, {
+                tool: toolName,
+                arguments: args,
+                result,
+                success
+            });
 
 
             // ==================================
-            // RETURN RESULT TO GEMINI
+            // RETURN RESULT TO GROQ
             // ==================================
 
             addToolResult(
                 contents,
-                toolName,
+                toolCallId,
                 result
             );
 
         }
-
     }
 
 
@@ -761,9 +696,7 @@ async function runAgent(messages) {
     // MAX ITERATIONS
     // ==========================================
 
-    state.status =
-        "max_iterations_reached";
-
+    state.status = "max_iterations_reached";
 
     throw new Error(
         `Nexus stopped after ` +
@@ -777,22 +710,15 @@ async function runAgent(messages) {
 // RESUME CONFIRMED ACTION
 // ==========================================
 
-async function resumeConfirmedAction(
-    confirmationId
-) {
+async function resumeConfirmedAction(confirmationId) {
 
     // ==========================================
     // FIND PENDING ACTION
     // ==========================================
 
-    const pending =
-        getPendingAction(
-            confirmationId
-        );
-
+    const pending = getPendingAction(confirmationId);
 
     if (!pending) {
-
         throw new Error(
             "Confirmation request no longer exists."
         );
@@ -803,28 +729,31 @@ async function resumeConfirmedAction(
         contents,
         state,
         tool: toolName,
-        arguments: args
+        arguments: args,
+        toolCallId
     } = pending;
+
+
+    if (!toolCallId) {
+        throw new Error(
+            "The original tool-call ID is missing. " +
+            "The pending confirmation may have been created " +
+            "using an older version of the agent."
+        );
+    }
 
 
     // ==========================================
     // FIND TOOL
     // ==========================================
 
-    const tool =
-        toolRegistry[toolName];
-
+    const tool = toolRegistry[toolName];
 
     if (!tool) {
 
-        deletePendingAction(
-            confirmationId
-        );
+        deletePendingAction(confirmationId);
 
-
-        throw new Error(
-            `Unknown tool: ${toolName}`
-        );
+        throw new Error(`Unknown tool: ${toolName}`);
     }
 
 
@@ -838,22 +767,14 @@ async function resumeConfirmedAction(
     // ==========================================
 
     let result;
-
     let success = true;
-
 
     try {
 
-        state.status =
-            "running";
+        state.status = "running";
+        state.currentTool = toolName;
 
-        state.currentTool =
-            toolName;
-
-
-        result =
-            await tool.execute(args);
-
+        result = await tool.execute(args);
 
         console.log(
             `📦 ${toolName} executed successfully.`
@@ -863,20 +784,14 @@ async function resumeConfirmedAction(
 
         success = false;
 
-
         console.error(
             `❌ ${toolName} failed:`,
             error.message
         );
 
-
         result = {
-
             success: false,
-
-            error:
-                error.message
-
+            error: error.message
         };
     }
 
@@ -885,24 +800,21 @@ async function resumeConfirmedAction(
     // RECORD EXECUTION
     // ==========================================
 
-    recordToolExecution(
-        state,
-        {
-            tool: toolName,
-            arguments: args,
-            result,
-            success
-        }
-    );
+    recordToolExecution(state, {
+        tool: toolName,
+        arguments: args,
+        result,
+        success
+    });
 
 
     // ==========================================
-    // ADD RESULT TO GEMINI CONTEXT
+    // ADD RESULT TO GROQ CONTEXT
     // ==========================================
 
     addToolResult(
         contents,
-        toolName,
+        toolCallId,
         result
     );
 
@@ -911,22 +823,16 @@ async function resumeConfirmedAction(
     // REMOVE PENDING ACTION
     // ==========================================
 
-    deletePendingAction(
-        confirmationId
-    );
+    deletePendingAction(confirmationId);
 
 
     // ==========================================
     // CONTINUE AGENT
     // ==========================================
 
-    while (
-        state.iteration <
-        state.maxIterations
-    ) {
+    while (state.iteration < state.maxIterations) {
 
         state.iteration++;
-
 
         console.log(
             `\n🤖 Nexus continuing... ` +
@@ -935,106 +841,61 @@ async function resumeConfirmedAction(
 
 
         // ======================================
-        // ASK GEMINI AGAIN
+        // ASK GROQ AGAIN
         // ======================================
 
-        const response =
-            await ai.models.generateContent({
-
-                model: "gemini-3.6-flash",
-
-                contents,
-
-                config: {
-
-                    tools,
-
-                    systemInstruction
-
-                }
-
-            });
+        const assistantMessage =
+            await requestModel(contents);
 
 
         const functionCalls =
-            response.functionCalls;
+            assistantMessage.tool_calls || [];
 
 
         // ======================================
         // FINAL RESPONSE
         // ======================================
 
-        if (
-            !functionCalls ||
-            functionCalls.length === 0
-        ) {
+        if (functionCalls.length === 0) {
 
-            state.status =
-                "completed";
-
+            state.status = "completed";
 
             return {
-
                 status: "completed",
-
-                text:
-                    response.text,
-
+                text: assistantMessage.content || "",
                 state
-
             };
         }
 
 
         // ======================================
-        // VALIDATE RESPONSE
+        // STORE ASSISTANT TOOL CALL MESSAGE
         // ======================================
 
-        if (
-            !response.candidates ||
-            !response.candidates[0] ||
-            !response.candidates[0].content
-        ) {
-
-            throw new Error(
-                "Gemini returned an invalid response."
-            );
-        }
-
-
-        // ======================================
-        // STORE MODEL TOOL CALL
-        // ==========================================
-
-        contents.push(
-            response.candidates[0].content
-        );
+        contents.push(assistantMessage);
 
 
         // ======================================
         // PROCESS TOOL CALLS
         // ======================================
 
-        for (
-            const functionCall
-            of functionCalls
-        ) {
+        for (const functionCall of functionCalls) {
 
             const nextToolName =
-                functionCall.name;
+                functionCall.function?.name;
 
             const nextArgs =
-                functionCall.args || {};
+                parseToolArguments(functionCall);
+
+            const nextToolCallId =
+                functionCall.id;
 
 
             console.log(
                 `\n🔧 Tool requested: ${nextToolName}`
             );
 
-            console.log(
-                "📥 Arguments:",
-                nextArgs
-            );
+            console.log("📥 Arguments:", nextArgs);
 
 
             // ==================================
@@ -1048,32 +909,22 @@ async function resumeConfirmedAction(
             if (!nextTool) {
 
                 const result = {
-
                     success: false,
-
-                    error:
-                        `Unknown tool: ${nextToolName}`
-
+                    error: `Unknown tool: ${nextToolName}`
                 };
 
-
-                recordToolExecution(
-                    state,
-                    {
-                        tool: nextToolName,
-                        arguments: nextArgs,
-                        result,
-                        success: false
-                    }
-                );
-
+                recordToolExecution(state, {
+                    tool: nextToolName,
+                    arguments: nextArgs,
+                    result,
+                    success: false
+                });
 
                 addToolResult(
                     contents,
-                    nextToolName,
+                    nextToolCallId,
                     result
                 );
-
 
                 continue;
             }
@@ -1092,33 +943,24 @@ async function resumeConfirmedAction(
             ) {
 
                 const result = {
-
                     success: false,
-
                     error:
                         "This exact tool call has already " +
                         "been executed."
-
                 };
 
-
-                recordToolExecution(
-                    state,
-                    {
-                        tool: nextToolName,
-                        arguments: nextArgs,
-                        result,
-                        success: false
-                    }
-                );
-
+                recordToolExecution(state, {
+                    tool: nextToolName,
+                    arguments: nextArgs,
+                    result,
+                    success: false
+                });
 
                 addToolResult(
                     contents,
-                    nextToolName,
+                    nextToolCallId,
                     result
                 );
-
 
                 continue;
             }
@@ -1128,62 +970,36 @@ async function resumeConfirmedAction(
             // NEXT CONFIRMATION
             // ==================================
 
-            if (
-                nextTool.requiresConfirmation
-            ) {
+            if (nextTool.requiresConfirmation) {
 
-                requestConfirmation(
-                    state,
-                    {
-                        tool:
-                            nextToolName,
-
-                        arguments:
-                            nextArgs
-                    }
-                );
+                requestConfirmation(state, {
+                    tool: nextToolName,
+                    arguments: nextArgs
+                });
 
 
                 const nextConfirmationId =
                     createPendingAction({
-
-                        messages:
-                            state.messages,
-
+                        messages: state.messages,
                         contents,
-
                         state,
+                        tool: nextToolName,
+                        arguments: nextArgs,
 
-                        tool:
-                            nextToolName,
-
-                        arguments:
-                            nextArgs
-
+                        // Preserve the next original tool-call ID.
+                        toolCallId: nextToolCallId
                     });
 
 
                 return {
-
-                    status:
-                        "confirmation_required",
+                    status: "confirmation_required",
 
                     confirmation: {
-
-                        id:
-                            nextConfirmationId,
-
-                        tool:
-                            nextToolName,
-
-                        arguments:
-                            nextArgs,
-
-                        category:
-                            nextTool.category
-
+                        id: nextConfirmationId,
+                        tool: nextToolName,
+                        arguments: nextArgs,
+                        category: nextTool.category
                     }
-
                 };
             }
 
@@ -1193,21 +1009,13 @@ async function resumeConfirmedAction(
             // ==================================
 
             let nextResult;
-
             let nextSuccess = true;
-
 
             try {
 
-                state.currentTool =
-                    nextToolName;
+                state.currentTool = nextToolName;
 
-
-                nextResult =
-                    await nextTool.execute(
-                        nextArgs
-                    );
-
+                nextResult = await nextTool.execute(nextArgs);
 
                 console.log(
                     `📦 ${nextToolName} executed successfully.`
@@ -1217,20 +1025,14 @@ async function resumeConfirmedAction(
 
                 nextSuccess = false;
 
-
                 console.error(
                     `❌ ${nextToolName} failed:`,
                     error.message
                 );
 
-
                 nextResult = {
-
                     success: false,
-
-                    error:
-                        error.message
-
+                    error: error.message
                 };
             }
 
@@ -1239,36 +1041,25 @@ async function resumeConfirmedAction(
             // RECORD
             // ==================================
 
-            recordToolExecution(
-                state,
-                {
-                    tool:
-                        nextToolName,
-
-                    arguments:
-                        nextArgs,
-
-                    result:
-                        nextResult,
-
-                    success:
-                        nextSuccess
-                }
-            );
+            recordToolExecution(state, {
+                tool: nextToolName,
+                arguments: nextArgs,
+                result: nextResult,
+                success: nextSuccess
+            });
 
 
             // ==================================
-            // RETURN RESULT TO GEMINI
+            // RETURN RESULT TO GROQ
             // ==================================
 
             addToolResult(
                 contents,
-                nextToolName,
+                nextToolCallId,
                 nextResult
             );
 
         }
-
     }
 
 
@@ -1276,9 +1067,7 @@ async function resumeConfirmedAction(
     // MAX ITERATIONS
     // ==========================================
 
-    state.status =
-        "max_iterations_reached";
-
+    state.status = "max_iterations_reached";
 
     throw new Error(
         `Nexus stopped after ` +
@@ -1293,9 +1082,6 @@ async function resumeConfirmedAction(
 // ==========================================
 
 module.exports = {
-
     runAgent,
-
     resumeConfirmedAction
-
 };

@@ -6,6 +6,7 @@ import sunCore from "./assets/sun-core.svg";
 import "./index.css";
 
 const API_URL = "http://localhost:3000";
+const SERVER_BUSY_MESSAGE = "Our servers are a little busy right now. Please try again in a little while.";
 
 /* -------------------------------------------------------------------------
    Static data
@@ -252,6 +253,68 @@ function TodoCard() {
 }
 
 /* -------------------------------------------------------------------------
+   Working indicator (spinning sun + live timer + current activity)
+   ------------------------------------------------------------------------- */
+
+function formatElapsed(totalSeconds) {
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
+}
+
+function WorkingIndicator({ conversationId }) {
+    const [startedAt] = useState(() => Date.now());
+    const [elapsed, setElapsed] = useState(0);
+    const [activity, setActivity] = useState("");
+
+    // Timer
+    useEffect(() => {
+        const timer = window.setInterval(() => {
+            setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1000);
+        return () => window.clearInterval(timer);
+    }, [startedAt]);
+
+    // What the agent is doing right now (asks the backend once a second)
+    useEffect(() => {
+        if (!conversationId) return undefined;
+        let cancelled = false;
+
+        const poll = async () => {
+            try {
+                const response = await fetch(`${API_URL}/api/agent/status?conversationId=${conversationId}`);
+                if (!response.ok) return;
+                const data = await response.json();
+                if (!cancelled) setActivity(data.activity || "");
+            } catch {
+                // Status is optional; keep showing the last known activity
+            }
+        };
+
+        const timer = window.setInterval(poll, 1000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [conversationId]);
+
+    return (
+        <div className="thinking-row">
+            <span className="thinking-sun" aria-hidden="true">
+                <img className="sun-rays" src={sunRays} alt="" draggable="false" />
+                <img className="sun-core" src={sunCore} alt="" draggable="false" />
+            </span>
+            <div className="working-copy">
+                <span className="thinking-label">
+                    Working for <b>{formatElapsed(elapsed)}</b>
+                </span>
+                <span className="working-activity">{activity || "Thinking"}…</span>
+            </div>
+        </div>
+    );
+}
+
+/* -------------------------------------------------------------------------
    App
    ------------------------------------------------------------------------- */
 
@@ -269,6 +332,7 @@ function App() {
     const [draftCaption, setDraftCaption] = useState("");
     const [linkedInStatus, setLinkedInStatus] = useState({ configured: false, connected: false });
     const [revealedChats, setRevealedChats] = useState(() => new Set());
+    const [sidebarOpen, setSidebarOpen] = useState(true);
 
     const messagesEndRef = useRef(null);
     const messageInputRef = useRef(null);
@@ -470,7 +534,7 @@ function App() {
 
             let errorMessage = "Something went wrong. Please try again.";
             if (error.status === 429 || error.type === "QUOTA_EXHAUSTED") {
-                errorMessage = "Gemini API quota is currently exhausted. Please try again when the quota resets.";
+                errorMessage = SERVER_BUSY_MESSAGE;
             } else if (error.status === 400 || error.type === "INVALID_REQUEST") {
                 errorMessage = "The AI request was invalid. Please try again.";
             } else if (error.message.includes("Failed to fetch")) {
@@ -480,6 +544,7 @@ function App() {
             }
 
             setMessages((previous) => [...previous, { role: "error", content: errorMessage }]);
+            await loadConversations();
         } finally {
             setLoading(false);
         }
@@ -527,7 +592,7 @@ function App() {
 
             const errorMessage =
                 error.status === 429 || error.type === "QUOTA_EXHAUSTED"
-                    ? "Gemini API quota is currently exhausted."
+                    ? SERVER_BUSY_MESSAGE
                     : error.message || "Failed to process the action.";
 
             setMessages((previous) => [...previous, { role: "error", content: errorMessage }]);
@@ -689,12 +754,45 @@ function App() {
         setRevealedChats(allChatsRevealed ? new Set() : new Set(conversations.map((conversation) => conversation.id)));
     };
 
+    const deleteChat = async (id) => {
+        if (!window.confirm("Delete this chat? This can't be undone.")) return;
+
+        try {
+            const response = await fetch(`${API_URL}/api/conversations/${id}`, { method: "DELETE" });
+            if (!response.ok) throw new Error("Could not delete this chat.");
+
+            setConversations((previous) => previous.filter((conversation) => conversation.id !== id));
+            setRevealedChats((previous) => {
+                const next = new Set(previous);
+                next.delete(id);
+                return next;
+            });
+            if (id === conversationId) newChat();
+        } catch (error) {
+            console.error("Failed to delete conversation:", error);
+            setNotice("Could not delete this chat. Please try again.");
+        }
+    };
+
     const confirmationDetails = formatConfirmationDetails();
 
     /* ----- Render ----- */
 
     return (
-        <div className="app-shell">
+        <div className={`app-shell ${sidebarOpen ? "" : "sidebar-closed"}`}>
+            {/* ===== Sidebar toggle (stays in the top-left corner) ===== */}
+            <button
+                className="sidebar-toggle"
+                onClick={() => setSidebarOpen((open) => !open)}
+                aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+                aria-expanded={sidebarOpen}
+                title={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+            >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="16" rx="3" />
+                    <path d="M9.5 4v16" />
+                </svg>
+            </button>
             {/* ===== Sidebar ===== */}
             <aside className="sidebar">
                 <div className="sidebar-top">
@@ -734,16 +832,31 @@ function App() {
                                     className={`conversation-item ${conversation.id === conversationId ? "active" : ""}`}
                                 >
                                     <button
+                                        className="conversation-delete"
+                                        onClick={() => deleteChat(conversation.id)}
+                                        aria-label="Delete chat"
+                                        title="Delete chat"
+                                    >
+                                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                            <path d="M3 6h18" />
+                                            <path d="M8 6V4h8v2" />
+                                            <path d="M6 6l1 14h10l1-14" />
+                                            <path d="M10 11v5M14 11v5" />
+                                        </svg>
+                                    </button>
+
+                                    <button
                                         className="conversation-open"
                                         onClick={() => loadConversation(conversation.id)}
                                         title={revealed ? conversation.title : undefined}
                                         aria-label={revealed ? conversation.title : "Open chat (title hidden)"}
                                     >
-                                        <span className="conversation-icon" aria-hidden="true">◌</span>
+                                        <span className="conversation-icon" aria-hidden="true" />
                                         <span className={`conversation-title ${revealed ? "" : "is-blurred"}`}>
                                             {conversation.title}
                                         </span>
                                     </button>
+
                                     <button
                                         className="conversation-view"
                                         onClick={() => toggleChatName(conversation.id)}
@@ -906,21 +1019,7 @@ function App() {
                                         </section>
                                     )}
 
-                                    {loading && !confirmation && (
-                                        <div className="thinking-row">
-                                            <span className="thinking-mark">
-                                                <span className="mini-mark" />
-                                            </span>
-                                            <div>
-                                                <span className="thinking-label">Tuesday AI is thinking</span>
-                                                <div className="thinking">
-                                                    <i />
-                                                    <i />
-                                                    <i />
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
+                                    {loading && !confirmation && <WorkingIndicator conversationId={conversationId} />}
 
                                     <div ref={messagesEndRef} />
                                 </div>
