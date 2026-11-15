@@ -18,6 +18,9 @@ const {
     getConversations
 } = require("./memory/conversation");
 
+const techPostDrafts = require("./techPost/drafts");
+const linkedin = require("./linkedin/client");
+
 const app = express();
 
 
@@ -25,9 +28,132 @@ const app = express();
 // MIDDLEWARE
 // ==========================================
 
-app.use(cors());
+const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+app.use(cors({ origin: frontendUrl }));
 
 app.use(express.json());
+
+
+// ==========================================
+// MANUAL TECH POST RESEARCH AND REVIEW
+// ==========================================
+
+app.get("/api/tech-post/drafts", async (req, res) => {
+    try {
+        return res.json(await techPostDrafts.listDrafts());
+    } catch (error) {
+        console.error("Failed to load technology post drafts:", error);
+        return res.status(500).json({ error: "Could not load technology post drafts." });
+    }
+});
+
+app.post("/api/tech-post/drafts", async (req, res) => {
+    try {
+        const topic = typeof req.body?.topic === "string" ? req.body.topic.trim().slice(0, 180) : "";
+        const draft = await techPostDrafts.createDraft(topic);
+        return res.status(201).json(draft);
+    } catch (error) {
+        console.error("Failed to draft a technology post:", error);
+        return res.status(502).json({ error: error.message || "Could not research and draft a technology post." });
+    }
+});
+
+app.get("/api/tech-post/drafts/:id/image", async (req, res) => {
+    try {
+        const image = await techPostDrafts.getDraftImage(req.params.id);
+        if (!image) return res.status(404).json({ error: "Draft image not found." });
+        return res.type(image.image_mime).set("Cache-Control", "private, no-store").send(image.image_data);
+    } catch (error) {
+        console.error("Failed to load technology post image:", error);
+        return res.status(500).json({ error: "Could not load the draft image." });
+    }
+});
+
+app.patch("/api/tech-post/drafts/:id", async (req, res) => {
+    try {
+        const caption = typeof req.body?.caption === "string" ? req.body.caption.trim() : "";
+        if (!caption || caption.length > 12000) {
+            return res.status(400).json({ error: "Caption must be between 1 and 12,000 characters." });
+        }
+        const draft = await techPostDrafts.updateCaption(req.params.id, caption);
+        if (!draft) return res.status(409).json({ error: "This draft can no longer be edited." });
+        return res.json(draft);
+    } catch (error) {
+        console.error("Failed to edit technology post draft:", error);
+        return res.status(500).json({ error: "Could not save the draft edit." });
+    }
+});
+
+app.post("/api/tech-post/drafts/:id/reject", async (req, res) => {
+    try {
+        const rejected = await techPostDrafts.rejectDraft(req.params.id);
+        if (!rejected) return res.status(409).json({ error: "This draft can no longer be rejected." });
+        return res.json({ status: "rejected" });
+    } catch (error) {
+        console.error("Failed to reject technology post draft:", error);
+        return res.status(500).json({ error: "Could not reject the draft." });
+    }
+});
+
+app.post("/api/tech-post/drafts/:id/publish", async (req, res) => {
+    if (req.body?.approved !== true) {
+        return res.status(400).json({ error: "Explicit approval is required before publishing." });
+    }
+    try {
+        const status = await linkedin.getStatus();
+        if (!status.connected) return res.status(409).json({ error: status.message || "Connect LinkedIn before publishing." });
+        const claimed = await techPostDrafts.claimDraft(req.params.id);
+        if (!claimed) return res.status(409).json({ error: "This draft is no longer waiting for approval." });
+        const result = await linkedin.publishApprovedDraft(req.params.id);
+        return res.json({ status: "posted", postUrn: result.postUrn });
+    } catch (error) {
+        console.error("Failed to publish approved technology post:", error);
+        return res.status(error.message?.includes("LinkedIn") ? 409 : 502).json({ error: error.message || "LinkedIn could not publish this draft." });
+    }
+});
+
+
+// ==========================================
+// LINKEDIN MEMBER CONNECTION
+// ==========================================
+
+app.get("/api/linkedin/status", async (req, res) => {
+    try {
+        return res.json(await linkedin.getStatus());
+    } catch (error) {
+        console.error("Failed to check LinkedIn connection:", error);
+        return res.status(500).json({ error: "Could not check the LinkedIn connection." });
+    }
+});
+
+app.get("/api/linkedin/connect", (req, res) => {
+    try {
+        return res.redirect(302, linkedin.createAuthorizationUrl());
+    } catch (error) {
+        return res.status(503).json({ error: error.message || "LinkedIn connection is not configured." });
+    }
+});
+
+app.get("/api/linkedin/callback", async (req, res) => {
+    try {
+        if (req.query.error) throw new Error("LinkedIn access was not granted.");
+        await linkedin.completeAuthorization(req.query.code, req.query.state);
+        return res.redirect(`${frontendUrl}/?linkedin=connected`);
+    } catch (error) {
+        console.error("LinkedIn authorization failed:", error);
+        return res.redirect(`${frontendUrl}/?linkedin=error`);
+    }
+});
+
+app.delete("/api/linkedin/connection", async (req, res) => {
+    try {
+        await linkedin.disconnect();
+        return res.json({ status: "disconnected" });
+    } catch (error) {
+        console.error("Failed to disconnect LinkedIn:", error);
+        return res.status(500).json({ error: "Could not disconnect LinkedIn." });
+    }
+});
 
 
 // ==========================================
