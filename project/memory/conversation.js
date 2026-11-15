@@ -99,12 +99,58 @@ async function getConversations() {
 }
 
 
+// ==========================================
+// DELETE CONVERSATION
+// Removes the chat's messages first, then the chat itself,
+// in one transaction so nothing is left half-deleted.
+// ==========================================
+
+async function deleteConversation(conversationId) {
+
+    const connection = await db.getConnection();
+
+    try {
+
+        await connection.beginTransaction();
+
+        await connection.execute(
+            `DELETE FROM messages
+             WHERE conversation_id = ?`,
+            [conversationId]
+        );
+
+        const [result] = await connection.execute(
+            `DELETE FROM conversations
+             WHERE id = ?`,
+            [conversationId]
+        );
+
+        await connection.commit();
+
+        return result.affectedRows > 0;
+
+    } catch (error) {
+
+        await connection.rollback();
+
+        throw error;
+
+    } finally {
+
+        connection.release();
+
+    }
+
+}
+
+
 module.exports = {
 
     createConversation,
     updateConversationTitle,
     saveMessage,
     getMessages,
-    getConversations
+    getConversations,
+    deleteConversation
 
 };
