@@ -1,8 +1,11 @@
+const OpenAI = require("openai");
 const { GoogleGenAI } = require("@google/genai");
 const db = require("../memory/database");
 const searchWeb = require("../tools/searchWeb");
 
-const textModel = process.env.GEMINI_TEXT_MODEL || "gemini-3.6-flash";
+// The caption is written by the same Groq model the chat uses.
+// Gemini is only used for the (optional) post image.
+const textModel = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
 const imageModel = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image";
 
 let tablesReady;
@@ -16,7 +19,7 @@ async function ensureTables() {
                 headline VARCHAR(255) NOT NULL,
                 caption TEXT NOT NULL,
                 sources JSON NOT NULL,
-                image_data LONGBLOB NOT NULL,
+                image_data LONGBLOB NULL,
                 image_mime VARCHAR(64) NOT NULL DEFAULT 'image/png',
                 status VARCHAR(32) NOT NULL DEFAULT 'pending_approval',
                 post_urn VARCHAR(255) NULL,
@@ -25,12 +28,24 @@ async function ensureTables() {
                 updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 INDEX idx_tech_post_drafts_status_created (status, created_at)
             )
-        `).catch((error) => {
+        `).then(() => db.query(
+            "ALTER TABLE tech_post_drafts MODIFY image_data LONGBLOB NULL"
+        )).catch((error) => {
             tablesReady = null;
             throw error;
         });
     }
     await tablesReady;
+}
+
+function getTextClient() {
+    if (!process.env.GROQ_API_KEY) {
+        throw new Error("GROQ_API_KEY is missing from your .env file.");
+    }
+    return new OpenAI({
+        apiKey: process.env.GROQ_API_KEY,
+        baseURL: "https://api.groq.com/openai/v1"
+    });
 }
 
 function getAi() {
@@ -42,7 +57,20 @@ function getAi() {
 
 function parseJson(text) {
     const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-    return JSON.parse(cleaned);
+    try {
+        return JSON.parse(cleaned);
+    } catch {
+        const start = cleaned.indexOf("{");
+        const end = cleaned.lastIndexOf("}");
+        if (start !== -1 && end > start) {
+            try {
+                return JSON.parse(cleaned.slice(start, end + 1));
+            } catch {
+                // fall through to the friendly error below
+            }
+        }
+        throw new Error("The AI did not return a usable draft. Please try again.");
+    }
 }
 
 function normalizeDate(value) {
@@ -118,18 +146,13 @@ async function gatherStories(topic) {
 }
 
 async function draftCaption(topic, stories) {
-    const ai = getAi();
-    const response = await ai.models.generateContent({
+    const prompt = `Prepare one concise, useful LinkedIn post about a genuinely recent technology development. Select one story from these search results and use only claims supported by the supplied material. Never invent a release date, feature, metric, quote, or source. If the evidence is weak or dates are unclear, state that plainly in the post rather than calling it brand new. Use a thoughtful professional voice, explain why the development matters, and end with one specific question. Do not add unsupported hashtags. Return only valid JSON with keys headline, topic, caption, and sourceUrls. sourceUrls must contain the exact URLs of the supplied sources that support the post. ${topic ? `The user asked to focus on: ${topic}.` : "The user wants the most newsworthy recent story across new AI models, tools, and technology."}\n\nSearch results:\n${JSON.stringify(stories)}`;
+
+    const completion = await getTextClient().chat.completions.create({
         model: textModel,
-        contents: [{
-            role: "user",
-            parts: [{
-                text: `Prepare one concise, useful LinkedIn post about a genuinely recent technology development. Select one story from these search results and use only claims supported by the supplied material. Never invent a release date, feature, metric, quote, or source. If the evidence is weak or dates are unclear, state that plainly in the post rather than calling it brand new. Use a thoughtful professional voice, explain why the development matters, and end with one specific question. Do not add unsupported hashtags. Return only valid JSON with keys headline, topic, caption, and sourceUrls. sourceUrls must contain the exact URLs of the supplied sources that support the post. ${topic ? `The user asked to focus on: ${topic}.` : "The user wants the most newsworthy recent story across new AI models, tools, and technology."}\n\nSearch results:\n${JSON.stringify(stories)}`
-            }]
-        }],
-        config: { responseMimeType: "application/json" }
+        messages: [{ role: "user", content: prompt }]
     });
-    const parsed = parseJson(response.text || "");
+    const parsed = parseJson(completion.choices?.[0]?.message?.content || "");
     const allowedSources = new Map(stories.map((source) => [source.url, source]));
     const sources = [...new Set(Array.isArray(parsed.sourceUrls) ? parsed.sourceUrls : [])]
         .filter((url) => allowedSources.has(url))
@@ -176,11 +199,37 @@ async function createDraft(topic = "") {
     }
     const stories = await gatherStories(topic);
     const draft = await draftCaption(topic, stories);
-    const image = await generateImage(draft.headline, draft.topic, draft.sources);
+    // 1) Try an AI-generated image (needs a Gemini plan that includes image generation)
+    let image = null;
+    if (process.env.GEMINI_API_KEY) {
+        try {
+            image = await generateImage(draft.headline, draft.topic, draft.sources);
+        } catch (error) {
+            console.error("⚠️ Gemini image skipped:", String(error.message).slice(0, 200));
+        }
+    }
+
+    // 2) Otherwise build a branded headline card locally (free, no API needed)
+    if (!image) {
+        try {
+            image = require("./cardImage").renderHeadlineCard(draft);
+        } catch (error) {
+            console.error("⚠️ Headline card skipped:", error.message);
+        }
+    }
+
+    // 3) If both fail, the draft is still saved and can be published as text only
     const [result] = await db.execute(
         `INSERT INTO tech_post_drafts (topic, headline, caption, sources, image_data, image_mime)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [draft.topic, draft.headline, draft.caption, JSON.stringify(draft.sources), image.data, image.mimeType]
+        [
+            draft.topic,
+            draft.headline,
+            draft.caption,
+            JSON.stringify(draft.sources),
+            image ? image.data : null,
+            image ? image.mimeType : "image/png"
+        ]
     );
     return getDraft(result.insertId);
 }
@@ -199,7 +248,7 @@ function publicDraft(row) {
         caption: row.caption,
         sources: parseSources(row.sources),
         imageMime: row.image_mime,
-        imageUrl: `/api/tech-post/drafts/${row.id}/image`,
+        imageUrl: row.has_image ? `/api/tech-post/drafts/${row.id}/image` : null,
         status: row.status,
         postUrn: row.post_urn,
         errorMessage: row.error_message,
@@ -210,7 +259,7 @@ function publicDraft(row) {
 async function getDraft(id) {
     await ensureTables();
     const [rows] = await db.execute(
-        `SELECT id, topic, headline, caption, sources, image_mime, status, post_urn, error_message, created_at
+        `SELECT id, topic, headline, caption, sources, image_mime, (image_data IS NOT NULL) AS has_image, status, post_urn, error_message, created_at
          FROM tech_post_drafts WHERE id = ? LIMIT 1`,
         [id]
     );
@@ -220,7 +269,7 @@ async function getDraft(id) {
 async function listDrafts() {
     await ensureTables();
     const [rows] = await db.execute(
-        `SELECT id, topic, headline, caption, sources, image_mime, status, post_urn, error_message, created_at
+        `SELECT id, topic, headline, caption, sources, image_mime, (image_data IS NOT NULL) AS has_image, status, post_urn, error_message, created_at
          FROM tech_post_drafts WHERE status IN ('pending_approval', 'needs_review')
          ORDER BY created_at DESC LIMIT 20`
     );
@@ -233,7 +282,7 @@ async function getDraftImage(id) {
         "SELECT image_data, image_mime FROM tech_post_drafts WHERE id = ? LIMIT 1",
         [id]
     );
-    return rows[0] || null;
+    return rows[0]?.image_data ? rows[0] : null;
 }
 
 async function updateCaption(id, caption) {

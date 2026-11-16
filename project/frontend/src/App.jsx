@@ -336,6 +336,7 @@ function App() {
 
     const messagesEndRef = useRef(null);
     const messageInputRef = useRef(null);
+    const draftRef = useRef(null);
 
     /* ----- Data loading ----- */
 
@@ -621,6 +622,9 @@ function App() {
             setTechDraft(data);
             setDraftCaption(data.caption);
             setNotice("Draft created. Review the sources, image, and caption before publishing.");
+
+            // Bring the new draft into view
+            window.setTimeout(() => draftRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
             await loadLinkedInStatus();
         } catch (error) {
             console.error("Technology post draft failed:", error);
@@ -1027,7 +1031,7 @@ function App() {
 
                             {/* LinkedIn tech post draft */}
                             {techDraft && (
-                                <section className="tech-post-draft" aria-label="LinkedIn post draft">
+                                <section ref={draftRef} className="tech-post-draft" aria-label="LinkedIn post draft">
                                     <div className="draft-header">
                                         <div>
                                             <p className="draft-kicker">TECH STORY · LINKEDIN DRAFT</p>
@@ -1038,11 +1042,17 @@ function App() {
                                         </span>
                                     </div>
 
-                                    <img
-                                        className="draft-image"
-                                        src={`${API_URL}${techDraft.imageUrl}`}
-                                        alt={`Generated editorial image for ${techDraft.headline}`}
-                                    />
+                                    {techDraft.imageUrl ? (
+                                        <img
+                                            className="draft-image"
+                                            src={`${API_URL}${techDraft.imageUrl}`}
+                                            alt={`Generated editorial image for ${techDraft.headline}`}
+                                        />
+                                    ) : (
+                                        <p className="draft-no-image">
+                                            No image could be generated this time, so this will be published as a text-only post.
+                                        </p>
+                                    )}
 
                                     <label className="draft-caption-label" htmlFor="tech-post-caption">
                                         Post caption

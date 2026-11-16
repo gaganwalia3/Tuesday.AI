@@ -173,8 +173,15 @@ app.post("/api/tech-post/drafts", async (req, res) => {
         return res.status(201).json(draft);
     } catch (error) {
         console.error("Failed to draft a technology post:", error);
-        return res.status(502).json({
-            error: error.message || "Could not research and draft a technology post."
+
+        const busy =
+            isQuotaError(error) ||
+            /quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(error.message || "");
+
+        return res.status(busy ? 429 : 502).json({
+            error: busy
+                ? SERVER_BUSY_MESSAGE
+                : error.message || "Could not research and draft a technology post."
         });
     }
 });

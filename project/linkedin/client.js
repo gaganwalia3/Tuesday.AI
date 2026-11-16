@@ -187,24 +187,28 @@ async function publishApprovedDraft(id) {
     let postRequestStarted = false;
     try {
         const { row, accessToken } = await getAuthorizedConnection();
-        const { data: upload } = await linkedinJson(
-            "https://api.linkedin.com/rest/images?action=initializeUpload",
-            accessToken,
-            {
-                method: "POST",
-                body: JSON.stringify({ initializeUploadRequest: { owner: row.member_id } })
-            }
-        );
-        const imageUrn = upload.value?.image;
-        const uploadUrl = upload.value?.uploadUrl;
-        if (!imageUrn || !uploadUrl) throw new Error("LinkedIn did not provide an image upload URL.");
+        // The image is optional: with no image, publish a text-only post
+        let imageUrn = null;
+        if (draft.image_data) {
+            const { data: upload } = await linkedinJson(
+                "https://api.linkedin.com/rest/images?action=initializeUpload",
+                accessToken,
+                {
+                    method: "POST",
+                    body: JSON.stringify({ initializeUploadRequest: { owner: row.member_id } })
+                }
+            );
+            imageUrn = upload.value?.image;
+            const uploadUrl = upload.value?.uploadUrl;
+            if (!imageUrn || !uploadUrl) throw new Error("LinkedIn did not provide an image upload URL.");
 
-        const uploadResponse = await fetch(uploadUrl, {
-            method: "PUT",
-            headers: { "Content-Type": draft.image_mime },
-            body: new Uint8Array(draft.image_data)
-        });
-        if (!uploadResponse.ok) throw new Error(`LinkedIn image upload failed (${uploadResponse.status}).`);
+            const uploadResponse = await fetch(uploadUrl, {
+                method: "PUT",
+                headers: { "Content-Type": draft.image_mime },
+                body: new Uint8Array(draft.image_data)
+            });
+            if (!uploadResponse.ok) throw new Error(`LinkedIn image upload failed (${uploadResponse.status}).`);
+        }
 
         postRequestStarted = true;
         const { headers } = await linkedinJson("https://api.linkedin.com/rest/posts", accessToken, {
@@ -218,13 +222,9 @@ async function publishApprovedDraft(id) {
                     targetEntities: [],
                     thirdPartyDistributionChannels: []
                 },
-                content: {
-                    media: {
-                        title: draft.headline,
-                        id: imageUrn,
-                        altText: draft.headline
-                    }
-                },
+                ...(imageUrn
+                    ? { content: { media: { title: draft.headline, id: imageUrn, altText: draft.headline } } }
+                    : {}),
                 lifecycleState: "PUBLISHED",
                 isReshareDisabledByAuthor: false
             })

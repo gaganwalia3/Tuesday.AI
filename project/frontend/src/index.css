@@ -2369,3 +2369,13 @@ button.tool-row:hover .tool-arrow {
     padding-left: 13px;
   }
 }
+
+/* No-image note on a tech post draft */
+.draft-no-image {
+  padding: 12px 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  color: #a49da1;
+  font-size: 11px;
+  line-height: 1.55;
+}
